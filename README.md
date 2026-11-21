@@ -33,3 +33,7 @@ The root build also refers to a separate Maven package registry. Access may be n
 This is a library, not a deployable bot. A consuming application must supply bot credentials, dispatcher implementations and its own application-state persistence. Do not commit Telegram tokens to the repository.
 
 **Build status:** the commands are derived from Gradle files and have not been executed as part of this documentation update.
+
+## Concurrency
+
+Register dispatchers before processing updates. The library does not synchronize shared handler objects or guarantee atomic updates of the same chat's state. See [concurrency and update processing](docs/CONCURRENCY.md).
