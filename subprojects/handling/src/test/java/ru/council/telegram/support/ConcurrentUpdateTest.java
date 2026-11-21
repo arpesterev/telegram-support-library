@@ -97,6 +97,60 @@ class ConcurrentUpdateTest {
         }
     }
 
+    @Dispatcher
+    public static class ConcurrentDispatcher {
+        private final CountDownLatch entered;
+
+        public ConcurrentDispatcher(CountDownLatch entered) {
+            this.entered = entered;
+        }
+
+        @OnTextMessage(id = 1)
+        public void handle(Message message, String text, ApplicationState state) {
+            entered.countDown();
+            try {
+                if (!entered.await(10, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Different chats were serialized unnecessarily");
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(ex);
+            }
+        }
+    }
+
+    @Test
+    void differentChatsCanProcessConcurrently() throws Exception {
+        CountDownLatch bothHandlersEntered = new CountDownLatch(2);
+        LocalBot bot = new LocalBot();
+        bot.registerDispatcherAndItsMethods(
+                new ConcurrentDispatcher(bothHandlersEntered), ConcurrentDispatcher.class);
+        for (long chatId : new long[] {1L, 2L}) {
+            bot.stored.put(chatId, new ApplicationState(
+                    ConcurrentDispatcher.class.getCanonicalName(), "handler", true, chatId));
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> first = pool.submit(() -> {
+                start.await();
+                bot.onUpdateReceived(incrementMessage(), 1L, () -> bot.stored.get(1L).copy());
+                return null;
+            });
+            Future<?> second = pool.submit(() -> {
+                start.await();
+                bot.onUpdateReceived(incrementMessage(), 2L, () -> bot.stored.get(2L).copy());
+                return null;
+            });
+            start.countDown();
+            assertTrue(bothHandlersEntered.await(10, TimeUnit.SECONDS));
+            first.get(15, TimeUnit.SECONDS);
+            second.get(15, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     @Test
     void stateEqualityUsesObjectEquals() {
         ApplicationState left = new ApplicationState("screen", "method", true, 9);
