@@ -3,7 +3,7 @@ name: Concurrency regression tests
 on:
   push:
     branches:
-      - 'fix/concurrent-update-processing-*'
+      - master
   pull_request:
   workflow_dispatch:
 
