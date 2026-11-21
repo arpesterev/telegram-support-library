@@ -20,17 +20,24 @@ import ru.council.telegram.support.reply.models.UserResponse;
 
 import javax.ws.rs.NotSupportedException;
 import java.io.IOException;
-import java.util.HashMap;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 public abstract class TelegramBot extends TelegramLongPollingBot {
 
-    protected final Map<String, DispatcherWrapper> executionMapping = new HashMap<>();
+    protected final Map<String, DispatcherWrapper> executionMapping = new ConcurrentHashMap<>();
+    private static final int CHAT_LOCK_STRIPES = 256;
+    private final Object[] chatLocks = new Object[CHAT_LOCK_STRIPES];
+    {
+        Arrays.setAll(chatLocks, index -> new Object());
+    }
     private final boolean deleteMessagesIfNotAllowed;
     private final boolean fallOnEditOrDelete;
-    private DispatcherWrapper mainDispatcher = null;
+    private volatile DispatcherWrapper mainDispatcher = null;
 
     public TelegramBot() {
         super();
@@ -55,7 +62,7 @@ public abstract class TelegramBot extends TelegramLongPollingBot {
         this.fallOnEditOrDelete = fallOnEditOrDelete;
     }
 
-    public <T> void registerDispatcherAndItsMethods(T dispatcher, Class<T> itsClass) {
+    public synchronized <T> void registerDispatcherAndItsMethods(T dispatcher, Class<T> itsClass) {
         if (dispatcher == null) {
             throw new DispatcherIsNullException("Dispatcher was null.");
         }
@@ -73,17 +80,44 @@ public abstract class TelegramBot extends TelegramLongPollingBot {
             mainDispatcher = new DispatcherWrapper(dispatcher, itsClass);
         } else {
             String canonicalName = itsClass.getCanonicalName();
-            if (executionMapping.containsKey(canonicalName)) {
+            if (executionMapping.putIfAbsent(canonicalName, new DispatcherWrapper(dispatcher, itsClass)) != null) {
                 throw new DispatcherAlreadyAddedToExecutionChainException("Dispatcher already added.");
             }
-            executionMapping.put(canonicalName, new DispatcherWrapper(dispatcher, itsClass));
+        }
+    }
+
+    /**
+     * Backwards-compatible API. The state argument may already be stale if it was loaded
+     * before another update. Prefer the Supplier overload for concurrent updates.
+     */
+    public OnUpdateProcessed onUpdateReceived(Update update, ApplicationState applicationState) {
+        Objects.requireNonNull(applicationState, "applicationState");
+        return onUpdateReceived(update, applicationState.getChatId(), () -> applicationState);
+    }
+
+    /**
+     * Serializes the complete load/process/persist sequence for one chat within this
+     * bot instance. The loader runs while holding the chat lock, so it must fetch
+     * the latest committed state rather than returning a previously cached snapshot.
+     * For multiple application instances, use transactional/optimistic storage locking.
+     */
+    public OnUpdateProcessed onUpdateReceived(Update update, long chatId, Supplier<ApplicationState> stateLoader) {
+        Objects.requireNonNull(update, "update");
+        Objects.requireNonNull(stateLoader, "stateLoader");
+        int stripe = Math.floorMod(Long.hashCode(chatId), chatLocks.length);
+        synchronized (chatLocks[stripe]) {
+            ApplicationState current = Objects.requireNonNull(stateLoader.get(), "stateLoader returned null");
+            if (current.getChatId() != chatId) {
+                throw new IllegalArgumentException("Loaded state belongs to another chat");
+            }
+            return processUpdate(update, current);
         }
     }
 
     @SneakyThrows
-    public OnUpdateProcessed onUpdateReceived(Update update, ApplicationState applicationState) {
+    private OnUpdateProcessed processUpdate(Update update, ApplicationState applicationState) {
         String canonicalScreenClassName = applicationState.getCanonicalScreenClassName();
-        DispatcherWrapper dispatcherWrapper = executionMapping.get(canonicalScreenClassName);
+        DispatcherWrapper dispatcherWrapper = Objects.requireNonNull(executionMapping.get(canonicalScreenClassName), "No dispatcher registered for chat screen " + canonicalScreenClassName);
         Message message = update.getMessage();
         CallbackQuery callbackQuery = update.getCallbackQuery();
         ApplicationState copy = applicationState.copy();

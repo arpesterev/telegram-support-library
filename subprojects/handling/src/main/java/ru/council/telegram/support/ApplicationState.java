@@ -31,7 +31,11 @@ public class ApplicationState {
         return applicationState;
     }
 
-    public boolean equals(ApplicationState applicationState) {
+    @Override
+    public boolean equals(Object candidate) {
+        if (this == candidate) return true;
+        if (!(candidate instanceof ApplicationState)) return false;
+        ApplicationState applicationState = (ApplicationState) candidate;
         if (!Objects.equals(canonicalScreenClassName, applicationState.canonicalScreenClassName)) {
             return false;
         }
@@ -47,5 +51,10 @@ public class ApplicationState {
         if (additionalParameters != null) {
             return additionalParameters.equals(applicationState.additionalParameters);
         } else return applicationState.additionalParameters == null;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(canonicalScreenClassName, methodName, messagesAllowed, chatId, additionalParameters);
     }
 }
